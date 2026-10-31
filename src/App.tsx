@@ -18,6 +18,7 @@ import {
   type ApprovalRequest,
 } from './approvals';
 import { threadMood } from './moods';
+import { joinsRunningTurn, STEERED_NOTE } from './steer';
 import { botShape } from './components/Bloub';
 import { type BloubShape } from './components/bloubFrames';
 import {
@@ -2698,6 +2699,30 @@ export default function App() {
       return;
     }
 
+    // A message typed while this conversation is still answering joins that
+    // turn: the host carries it into the run at its next tool boundary, and the
+    // answer keeps coming. Killing the turn instead would throw away the work
+    // the person was waiting for. A run that already ended refuses, and the
+    // message falls through to the next turn, as before.
+    const running = requestThread.current.get(thread.id) ?? '';
+    if (joinsRunningTurn({ busy: Boolean(running), text, attachments: attached.length })) {
+      const joined = await window.hermes?.steerRun?.({ requestId: running, text });
+      if (joined?.ok) {
+        const steered: Message = { id: uid(), role: 'user', text, steered: true };
+        setThreads((current) =>
+          current.map((item) =>
+            item.id === thread.id
+              ? { ...item, messages: [...item.messages, steered] }
+              : item,
+          ),
+        );
+        setDraft('');
+        stopDictation();
+        if (composerRef.current) composerRef.current.style.height = '40px';
+        return;
+      }
+    }
+
     const threadId = thread.id;
     const requestId = uid();
     const bridge = window.hermes;
@@ -3701,6 +3726,9 @@ export default function App() {
                             members={activeThread.members}
                           />
                         </div>
+                        {message.steered ? (
+                          <span className="message-steered">{STEERED_NOTE}</span>
+                        ) : null}
                         {messageReactions(message, activeThread.name).length ? (
                           <span className="reaction-row">
                             {groupReactions(

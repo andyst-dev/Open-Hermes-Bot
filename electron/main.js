@@ -3387,8 +3387,9 @@ async function runChatTurn(event, payload) {
   // and leaves the stored conversation untouched.
   if (payload?.instructions) body.system_message = String(payload.instructions);
 
-  /** @type {AbortController & { canceled?: boolean }} */
+  /** @type {AbortController & { canceled?: boolean, runId?: string, profile?: string }} */
   const controller = new AbortController();
+  controller.profile = String(payload?.profile ?? '');
   const requestId = String(payload?.requestId ?? '');
   // A new message in the same thread cancels the previous turn by request id.
   if (requestId) chatRequests.set(requestId, controller);
@@ -3505,6 +3506,8 @@ async function runChatTurn(event, payload) {
           });
         } else if (name === 'run.started') {
           runId = String(parsed?.run_id ?? '');
+          // The handle a steer needs: the renderer only knows its request id.
+          controller.runId = runId;
         } else if (name === 'assistant.completed') {
           const final = parsed?.message?.content ?? parsed?.text ?? parsed?.content;
           if (typeof final === 'string' && !text) text = final;
@@ -3610,6 +3613,29 @@ ipcMain.handle('hermes:chat:cancel', (_event, requestId) => {
   if (!controller) return { ok: false };
   controller.canceled = true;
   controller.abort();
+  return { ok: true };
+});
+
+// A message typed while the turn is still running joins that turn instead of
+// killing it: Hermes carries the text into the run at its next tool boundary,
+// and the answer keeps coming to the window that asked for it. A run that has
+// already ended refuses, and the renderer falls back to starting the next turn.
+ipcMain.handle('hermes:chat:steer', async (_event, payload) => {
+  const requestId = String(payload?.requestId ?? '');
+  const text = String(payload?.text ?? '').trim();
+  if (!text) return { ok: false, error: 'Nothing to add' };
+  const controller = chatRequests.get(requestId);
+  const runId = String(controller?.runId ?? '').trim();
+  if (!runId) return { ok: false, error: 'No turn to add this to' };
+  const answer = await apiCall(`/v1/runs/${encodeURIComponent(runId)}/steer`, {
+    method: 'POST',
+    body: { input: text },
+    profile: String(controller?.profile ?? ''),
+    timeoutMs: 20000,
+  });
+  if (!answer.ok) {
+    return { ok: false, error: apiErrorText(answer, 'The turn did not take that.') };
+  }
   return { ok: true };
 });
 
